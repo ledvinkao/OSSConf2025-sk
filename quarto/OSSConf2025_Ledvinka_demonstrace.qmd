@@ -2,7 +2,7 @@
 title: "OSSConf2025 - demonstrace práce s R balíčky {terra} a {sf}"
 author: "Ondřej Ledvinka (ondrej.ledvinka@chmi.cz, ledvinka@natur.cuni.cz)"
 format: html
-embedded-resources: true
+embed-resources: true
 toc: true
 editor: visual
 date: 2025-07-01
