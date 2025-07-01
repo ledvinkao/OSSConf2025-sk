@@ -1,0 +1,210 @@
+---
+title: "OSSConf2025 - demonstrace práce s R balíčky {terra} a {sf}"
+author: "Ondřej Ledvinka (ondrej.ledvinka@chmi.cz, ledvinka@natur.cuni.cz)"
+format: html
+embedded-resources: true
+toc: true
+editor: visual
+date: 2025-07-01
+date-modified: "`r as.character(Sys.Date())`"
+theme: darkly
+lang: cs
+engine: knitr
+---
+
+## Předpoklady
+
+Máme založený R projekt, a proto si dovolíme odkazovat se na soubory relativně. V projektu máme složku *geodata* obsahující soubory s rastry (.asc) pro dlouhodobou roční teplotu vzduchu a dlouhodobý roční úhrn srážek – to vše pro historické období 1991--2020 a čtyři budoucí období 2021--2040, 2041--2060, 2061--2080 a 2081--2100, které poskytují scénáře SSP2-4.5 a SSP5-8.5 regionálního klimatického modelu ALADIN-CLIMATE/CZ. Všechna geodata pochází ze stránek projektu PERUN: <https://www.perun-klima.cz/scenare/index.php>.
+
+Abychom mohli pracovat s těmito soubory (a mohli provádět operace i s vektorovými geodaty), načteme si patřičné R balíčky. *Tidyverse* je již samozřejmostí.
+
+```{r}
+#| label: nacteni-balicku
+xfun::pkg_attach2("tidyverse", # podmínkou je nainstalovaný minimálně balíček xfun
+                  "terra", # pro práci s rastrovými geodaty
+                  "RCzechia") # pro práci s vektorovými geodaty (s RCzechia se automaticky načítá i balíček sf); pozor! předpokládá se dobré připojení k internetu kvůli stahování vektorových vrstev
+```
+
+## Znění úkolu
+
+Za využití polygonů administrativních krajů Česka, které vrací funkce `RCzechia::kraje()` zjistěme, jaká je ve všech disponibilních obdobích průměrná teplota vzduchu a průměrný úhrn srážek ve všech těchto krajích. Nezapomeneme přitom zohlednit nestejnou plochu buněk rastru. nakonec vypočítáme diference (teplota) a poměry (srážky) mezi budoucími obdobími a referenčním obdobím 1991-2020.
+
+## Načtení geodat (rastry pro budoucí obodobí a vektorová vrstva)
+
+```{r}
+#| label: nacteni-geodat
+# nejpre polygony krajů
+kraje <- kraje() |> 
+  as_tibble() |> # toto je pro převod na lepší formát
+  st_sf()
+
+# prohlédneme, povšimneme si hlavně CRS (souřadnicového referenčního systému)
+kraje
+
+# data z rastrových souborů lze načíst hromadně
+# nejprve zpracujeme scénářové rastry
+# musíme si ale dát pozor na příslušnosti k obdobím, což jistí názvy vrstev
+r <- rast(dir("geodata",
+              pattern = "^SSP.*\\.asc$",
+              recursive = T,
+              full.names = T))
+
+names(r)
+
+# CRS rastrových a vektorových geodat se zde neshodují což současným verzím balíčku terra již nevadí
+# ostravští kolegové zde nenastavili nic, ale víme, že by měl být nastaven EPSG:32633
+crs(r) |> 
+  cat()
+
+crs(r) <- "epsg:32633"
+
+crs(r) |> 
+  cat()
+
+st_crs(kraje)
+```
+
+## Výpočet průměrů pro polygony – váženě dle různé plochy buněk
+
+Protože CRS, který máme u rastrových vrstev, nezaručuje plochojevnost, je vhodné plošné průměry založit na váženém průměru podle plochy reprezentované jednotlivými buňkami. Založme si tedy vhodný objekt třídy *SpatRaster*, který nám dopomůže s výpočtem vážených průměrů a vhodnou funkcí vloženou do funkce `terra::extract()` získejme kýžené výsledky.
+
+```{r}
+#| label: vazene-prumery
+# nejprve rastrová vrstva pro váhy
+vahy <- r |> 
+  cellSize()
+
+# teď je čas na funkci extract()
+# při aplikaci této funkce využijeme možnosti připojení polí do vektorové vrstvy s kraji
+kraje <- kraje |> 
+  select(kraj = NAZ_CZNUTS3)
+
+# pro aplikaci váženého průměru násobíme hodnoty rastrových buněk jejich plochou
+r2 <- r * vahy
+
+# musíme zdědit jména vrstev, jinak všude bude jenom lyr1, lyr2 apod.
+names(r2) <- names(r)
+
+# do vektorové vrstvy s kraji přidáme extrahované sumy z r2
+kraje <- extract(r2,
+                 kraje,
+                 fun = sum,
+                 bind = T,
+                 na.rm = T) |> 
+  st_as_sf() |> 
+  as_tibble() |> 
+  st_sf()
+
+# ještě do atributů přidáme pole s celkovou plochou danou buňkami patřícími do polygonů
+kraje <- extract(vahy,
+                 kraje,
+                 fun = sum,
+                 bind = T,
+                 na.rm = T) |> 
+  st_as_sf() |> 
+  st_drop_geometry() |> 
+  as_tibble()
+
+# nyní využijeme funkcí tidyverse k natažení tabulky do dlouhého formátu
+# rovnou můžeme i dělit celkovou plochou a zaokrouhlit na jedno desetinné místo
+kraje <- kraje |> 
+  pivot_longer(cols = starts_with("SSP"),
+               names_to = "vrstva",
+               values_to = "val_num") |> 
+  mutate(val_num = val_num / area,
+         val_num = round(val_num, 1))
+```
+
+## Totéž pro rastry referenčního období
+
+```{r}
+#| label: reference
+# zde je ještě zrada v tom, že rastry nemají stejný rozsah
+# u načítání tedy volíme jinou strategii s využitím funkcionálního programování
+refer <- dir("geodata",
+             pattern = "^1991.*\\.asc$",
+             full.names = T) |> 
+  map(\(x) rast(x))
+
+rozsah <- refer[[2]] |> 
+  ext()
+
+rozsah2 <- refer[[1]] |> 
+  ext()
+
+refer <- refer |> 
+  map(\(x) crop(x, rozsah)) |> 
+  map(\(x) crop(x, rozsah2))
+
+refer <- refer |> 
+  map(\(x) {ext(x) <- rozsah
+  return(x)}) |> 
+  rast()
+
+crs(refer) <- "epsg:32633"
+
+vahy2 <- cellSize(refer)
+
+refer2 <- refer * vahy2
+
+names(refer2) <- names(refer)
+
+kraje2 <- kraje() |> 
+  select(kraj = NAZ_CZNUTS3)
+
+kraje2 <- extract(refer2,
+                  kraje2,
+                  fun = sum,
+                  bind = T,
+                  na.rm = T) |> 
+  st_as_sf() |> 
+  as_tibble() |> 
+  st_sf()
+
+kraje2 <- extract(vahy2,
+                  kraje2,
+                  fun = sum,
+                  bind = T,
+                  na.rm = T) |> 
+  st_as_sf() |> 
+  st_drop_geometry() |> 
+  as_tibble()
+
+kraje2 <- kraje2 |> 
+  pivot_longer(cols = 2:3, # i indexy se lze odkazovat na sloupce, které mají být nataženy (vhodné, pokud se nám nechce psát dlouhé názvy)
+               names_to = "vrstva",
+               values_to = "val_num") |> 
+  mutate(val_num = val_num / area,
+         val_num = round(val_num, 1))
+```
+
+## Propojení tabulek a výpočet diferencí (u teploty) / poměrů (u srážek)
+
+```{r}
+#| label: diference-podily
+# pro propojení si musíme vytvořit klíčové sloupce
+kraje <- kraje |> 
+  mutate(klic1 = str_split_i(vrstva, # velmi šiková funkce na vytáhnutí části textu
+                             "_",
+                             2))
+
+kraje2 <- kraje2 |> 
+  mutate(klic2 = str_split_i(vrstva,
+                             "_",
+                             2))
+
+# propojujeme
+kraje <- kraje |> 
+  select(-area) |> # zbavujeme se zbytečné plochy
+  left_join(kraje2 |> 
+              select(-area), # zde také (dokonce uvnitř join funkce)
+            join_by(kraj,
+                    klic1 == klic2)) |> # využíváme celkem nového pomocníka join_by()
+  mutate(val_num = if_else(klic1 == "T", val_num.x - val_num.y, val_num.x / val_num.y * 100), # lze nastavit i podmínku ve funkci mutate()
+         val_num = round(val_num, 1)) 
+
+# prohlížíme výsledek
+kraje
+```
+
+Nyní jsme velmi dobře připraveni na kreslení grafů. Ale to je na jinou prezentaci:-)
